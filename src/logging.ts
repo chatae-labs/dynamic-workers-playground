@@ -2,7 +2,7 @@ import {
   DurableObject,
   RpcTarget,
   WorkerEntrypoint,
-  exports
+  exports,
 } from "cloudflare:workers";
 
 export interface LogEntry {
@@ -33,7 +33,7 @@ function normalizeLogMessage(message: unknown): string {
   if (Array.isArray(message)) {
     return message
       .map((entry) =>
-        typeof entry === "string" ? entry : JSON.stringify(entry)
+        typeof entry === "string" ? entry : JSON.stringify(entry),
       )
       .join(" ");
   }
@@ -42,14 +42,14 @@ function normalizeLogMessage(message: unknown): string {
 }
 
 function isFetchTraceEvent(
-  event: TraceItem["event"]
+  event: TraceItem["event"],
 ): event is TraceItemFetchEventInfo {
   return event !== null && "request" in event;
 }
 
 function toRequestSummary(
   event: TraceItem,
-  workerId: string
+  workerId: string,
 ): StructuredDynamicWorkerEvent | null {
   if (!isFetchTraceEvent(event.event)) {
     return null;
@@ -70,13 +70,13 @@ function toRequestSummary(
     method: event.event.request.method,
     url,
     path,
-    status
+    status,
   };
 }
 
 function toExceptionEvents(
   event: TraceItem,
-  workerId: string
+  workerId: string,
 ): StructuredDynamicWorkerEvent[] {
   return event.exceptions.map((exception: TraceException) => ({
     source: "dynamic-worker-tail",
@@ -86,13 +86,13 @@ function toExceptionEvents(
     message: exception.message,
     timestamp: exception.timestamp,
     name: exception.name,
-    stack: exception.stack
+    stack: exception.stack,
   }));
 }
 
 function toLogEvents(
   event: TraceItem,
-  workerId: string
+  workerId: string,
 ): StructuredDynamicWorkerEvent[] {
   return event.logs.map((log: TraceLog) => ({
     source: "dynamic-worker-tail",
@@ -100,12 +100,12 @@ function toLogEvents(
     kind: "log",
     level: log.level,
     message: normalizeLogMessage(log.message),
-    timestamp: log.timestamp
+    timestamp: log.timestamp,
   }));
 }
 
 function toRealtimeLogEntries(
-  events: StructuredDynamicWorkerEvent[]
+  events: StructuredDynamicWorkerEvent[],
 ): LogEntry[] {
   return events
     .filter((event) => event.kind !== "request")
@@ -115,7 +115,7 @@ function toRealtimeLogEntries(
         event.kind === "exception" && event.name
           ? `${event.name}: ${event.message}`
           : event.message,
-      timestamp: event.timestamp
+      timestamp: event.timestamp,
     }));
 }
 
@@ -171,7 +171,7 @@ export class DynamicWorkerTail extends WorkerEntrypoint<
 > {
   override async tail(events: TraceItem[]) {
     const logSessionStub = exports.LogSession.getByName(
-      this.ctx.props.workerId
+      this.ctx.props.workerId,
     );
 
     for (const event of events) {
@@ -184,7 +184,7 @@ export class DynamicWorkerTail extends WorkerEntrypoint<
 
       structuredEvents.push(...toLogEvents(event, this.ctx.props.workerId));
       structuredEvents.push(
-        ...toExceptionEvents(event, this.ctx.props.workerId)
+        ...toExceptionEvents(event, this.ctx.props.workerId),
       );
 
       if (structuredEvents.length > 0) {

@@ -1,6 +1,33 @@
 import { exports } from "cloudflare:workers";
-import { createWorker } from "@cloudflare/worker-bundler";
-import { handleGitHubImport } from "./github";
+import { WorkerEntrypoint } from "cloudflare:workers";
+
+type ChatRoomProps = {
+  // API key to the remote chat API.
+  apiKey: string;
+
+  // Name of the room to post to.
+  roomName: string;
+
+  // Name of the bot posting.
+  botName: string;
+};
+
+export class ChatRoom extends WorkerEntrypoint<Cloudflare.Env, ChatRoomProps> {
+  // Any methods defined on this class will be callable
+  // by the Dynamic Worker.
+
+  // Method to post a message to chat.
+  async post(text: string): Promise<string> {
+    let { apiKey, botName, roomName } = this.ctx.props;
+
+    // Prefix the message with the bot's name.
+    text = `[${botName}]: ${text} in ${roomName}`;
+
+    // Send it to the chat service.
+    console.log("POSTING MESSAGE TO CHAT", text);
+    return text;
+  }
+}
 
 export { DynamicWorkerTail, LogSession } from "./logging";
 
@@ -38,227 +65,562 @@ interface RunRequestBody {
   };
 }
 
-async function createWorkerId(
-  files: Record<string, string>,
-  options?: RunRequestBody["options"]
-): Promise<string> {
-  const sortedFiles = Object.keys(files)
-    .sort()
-    .map((path) => [path, files[path]]);
-
-  const payload = JSON.stringify({
-    files: sortedFiles,
-    bundle: options?.bundle ?? true,
-    minify: options?.minify ?? false
-  });
-
-  const digest = await crypto.subtle.digest(
-    "SHA-256",
-    new TextEncoder().encode(payload)
-  );
-  const hash = Array.from(new Uint8Array(digest), (byte) =>
-    byte.toString(16).padStart(2, "0")
-  )
-    .join("")
-    .slice(0, 16);
-
-  return `dynamic-workers-playground-worker-${hash}`;
-}
-
-async function executeWorker(
-  worker: WorkerStub,
-  state: WorkerState,
-  workerId: string,
-  pathname = "/"
-): Promise<Response> {
-  const entrypoint = worker.getEntrypoint() as Fetcher & {
-    __warmup__?: () => Promise<void>;
-  };
-
-  const loadStart = Date.now();
-  try {
-    await entrypoint.__warmup__?.();
-  } catch {
-    // Warmup intentionally calls a method that does not exist so the worker cold-starts.
-  }
-  const loadTime = Date.now() - loadStart;
-
-  const { buildTime, bundleInfo } = state;
-  const logSessionStub = runtimeExports.LogSession.getByName(workerId);
-  const logWaiter = await logSessionStub.waitForLogs();
-
-  const runStart = Date.now();
-  const request = new Request(
-    `https://example.com${pathname.startsWith("/") ? pathname : `/${pathname}`}`
-  );
-
-  let workerResponse: Response;
-  let responseBody = "";
-  let workerError: { message: string; stack?: string } | null = null;
-
-  try {
-    workerResponse = await entrypoint.fetch(request);
-    responseBody = await workerResponse.text();
-
-    if (workerResponse.status >= 500) {
-      workerError = {
-        message: responseBody || "Worker returned an internal error."
-      };
-    }
-  } catch (error) {
-    workerError = {
-      message: error instanceof Error ? error.message : String(error),
-      stack: error instanceof Error ? error.stack : undefined
-    };
-    workerResponse = new Response("Worker execution failed", { status: 500 });
-  }
-
-  const runTime = Date.now() - runStart;
-  const logs = await logWaiter.getLogs(1000);
-
-  const headers: Record<string, string> = {};
-  workerResponse.headers.forEach((value, key) => {
-    headers[key] = value;
-  });
-
-  return Response.json({
-    bundleInfo: bundleInfo ?? {
-      mainModule: "(cached)",
-      modules: [],
-      warnings: []
-    },
-    response: {
-      status: workerResponse.status,
-      headers,
-      body: responseBody
-    },
-    workerError,
-    logs,
-    timing: {
-      buildTime,
-      loadTime,
-      runTime,
-      totalTime: buildTime + loadTime + runTime
-    }
-  });
-}
-
-function buildErrorResponse(error: unknown): Response {
-  console.error("Error in dynamic-workers-playground:", error);
-  return Response.json(
-    {
-      error: error instanceof Error ? error.message : "Unknown error",
-      stack: error instanceof Error ? error.stack : undefined
-    },
-    { status: 500 }
-  );
-}
-
-function normalizeFiles(files: Record<string, string>): Record<string, string> {
-  const normalized = Object.fromEntries(
-    Object.entries(files)
-      .map(([path, contents]) => [path.trim(), contents])
-      .filter(([path]) => path.length > 0)
-  );
-
-  if (!normalized["package.json"]) {
-    const entryPoint =
-      normalized["src/index.ts"] || normalized["src/index.js"]
-        ? Object.keys(normalized).find(
-            (file) => file === "src/index.ts" || file === "src/index.js"
-          )
-        : Object.keys(normalized).find(
-            (file) => file.endsWith(".ts") || file.endsWith(".js")
-          );
-
-    normalized["package.json"] = JSON.stringify(
-      {
-        name: "dynamic-workers-playground-worker",
-        main: entryPoint ?? "src/index.ts"
-      },
-      null,
-      2
-    );
-  }
-
-  return normalized;
-}
-
 export default {
   async fetch(
     request: Request,
     env: Env,
-    ctx: ExecutionContext
+    ctx: ExecutionContext,
   ): Promise<Response> {
-    const url = new URL(request.url);
+    const worker = env.LOADER.get("my-worker-7290", async () => {
+      let chatRoom = ctx.exports.ChatRoom({
+        props: {
+          apiKey: "123123123123",
+          roomName: "#bot-chat",
+          botName: "Robo",
+        },
+      });
 
-    if (url.pathname === "/api/github" && request.method === "POST") {
-      return handleGitHubImport(request);
-    }
+      const contextExports = (ctx as unknown as { exports: LoaderExports })
+        .exports;
 
-    if (url.pathname === "/api/run" && request.method === "POST") {
-      try {
-        const { files, pathname, options } =
-          (await request.json()) as RunRequestBody;
+      return {
+        modules: {
+          "src/index.js": [
+            "import { WorkerEntrypoint } from 'cloudflare:workers';",
+            "",
+            "// ---------------------------------------------------------------------------",
+            "// In-memory Store",
+            "// ---------------------------------------------------------------------------",
+            "",
+            "const store = { todos: [], idCounter: 0 };",
+            "",
+            "function allTodos() {",
+            "  return [...store.todos].sort(",
+            "    (a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime()",
+            "  );",
+            "}",
+            "",
+            "function todoCounts() {",
+            "  let active = 0;",
+            "  let completed = 0;",
+            "  for (const t of store.todos) {",
+            "    t.completed ? completed++ : active++;",
+            "  }",
+            "  return { active, completed, total: active + completed };",
+            "}",
+            "",
+            "// ---------------------------------------------------------------------------",
+            "// Response Helpers",
+            "// ---------------------------------------------------------------------------",
+            "",
+            "function htmlResponse(body, status = 200) {",
+            "  return new Response(body, {",
+            "    status,",
+            '    headers: { "Content-Type": "text/html; charset=utf-8" },',
+            "  });",
+            "}",
+            "",
+            "function textResponse(body, status = 200) {",
+            "  return new Response(body, {",
+            "    status,",
+            '    headers: { "Content-Type": "text/plain; charset=utf-8" },',
+            "  });",
+            "}",
+            "",
+            "// ---------------------------------------------------------------------------",
+            "// HTML Components",
+            "// ---------------------------------------------------------------------------",
+            "",
+            "function esc(s) {",
+            "  return s",
+            '    .replace(/&/g, "&amp;")',
+            '    .replace(/</g, "&lt;")',
+            '    .replace(/>/g, "&gt;")',
+            '    .replace(/"/g, "&quot;");',
+            "}",
+            "",
+            "function TodoCheck(todo) {",
+            "  const checkmark = todo.completed",
+            '    ? \'<svg width="12" height="12" viewBox="0 0 12 12" fill="none"><path d="M2.5 6.5L4.5 8.5L9.5 3.5" stroke="white" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" /></svg>\'',
+            '    : "";',
+            "  return `",
+            "    <button",
+            '      class="check ${todo.completed ? "checked" : ""}"',
+            '      hx-patch="/todos/${todo.id}/toggle"',
+            '      hx-target="#todo-list"',
+            '      hx-swap="innerHTML"',
+            '      aria-label="${todo.completed ? "Mark incomplete" : "Mark complete"}"',
+            "    >${checkmark}</button>`;",
+            "}",
+            "",
+            "function TodoItem(todo) {",
+            "  return `",
+            '    <li class="todo-item" id="todo-${todo.id}">',
+            "      ${TodoCheck(todo)}",
+            "      <span",
+            '        class="title ${todo.completed ? "completed" : ""}"',
+            '        hx-get="/todos/${todo.id}/edit"',
+            '        hx-target="#todo-${todo.id}"',
+            '        hx-swap="outerHTML"',
+            '        hx-trigger="dblclick"',
+            "      >${esc(todo.title)}</span>",
+            "      <button",
+            '        class="delete-btn"',
+            '        hx-delete="/todos/${todo.id}"',
+            '        hx-target="#todo-list"',
+            '        hx-swap="innerHTML"',
+            '        aria-label="Delete todo"',
+            "      >&times;</button>",
+            "    </li>`;",
+            "}",
+            "",
+            "function TodoEditItem(todo) {",
+            "  return `",
+            '    <li class="todo-item" id="todo-${todo.id}">',
+            "      ${TodoCheck(todo)}",
+            "      <form",
+            '        hx-patch="/todos/${todo.id}"',
+            '        hx-target="#todo-list"',
+            '        hx-swap="innerHTML"',
+            '        style="flex:1;display:flex"',
+            "      >",
+            "        <input",
+            '          class="edit-input"',
+            '          type="text"',
+            '          name="title"',
+            '          value="${esc(todo.title)}"',
+            "          autofocus",
+            '          onfocus="this.setSelectionRange(this.value.length,this.value.length)"',
+            '          onblur="this.form.requestSubmit()"',
+            "          onkeydown=\"if(event.key==='Escape'){htmx.ajax('GET','/todos/list','#todo-list')}\"",
+            "        />",
+            "      </form>",
+            '      <button class="delete-btn" style="visibility:hidden">&times;</button>',
+            "    </li>`;",
+            "}",
+            "",
+            "function TodoList(filtered) {",
+            "  if (filtered.length === 0) {",
+            "    return '<li class=\"empty-msg\">No todos yet &mdash; add one above!</li>';",
+            "  }",
+            '  return filtered.map(TodoItem).join("");',
+            "}",
+            "",
+            "function FooterHtml() {",
+            "  const { active, completed, total } = todoCounts();",
+            '  if (total === 0) return \'<div id="footer" class="footer"></div>\';',
+            "  const clearBtn =",
+            "    completed > 0",
+            '      ? `<button class="clear-btn" hx-delete="/todos" hx-target="#todo-list" hx-swap="innerHTML">Clear completed (${completed})</button>`',
+            '      : "";',
+            "  return `",
+            '    <div id="footer" class="footer visible">',
+            '      <span>${active} item${active !== 1 ? "s" : ""} left</span>',
+            "      ${clearBtn}",
+            "    </div>`;",
+            "}",
+            "",
+            "function Layout(content) {",
+            "  return `<!doctype html>",
+            '<html lang="en">',
+            "  <head>",
+            '    <meta charset="utf-8" />',
+            '    <meta name="viewport" content="width=device-width, initial-scale=1" />',
+            "    <title>Todos</title>",
+            "    <script",
+            '      src="https://cdn.jsdelivr.net/npm/htmx.org@2.0.8/dist/htmx.min.js"',
+            '      integrity="sha384-/TgkGk7p307TH7EXJDuUlgG3Ce1UVolAOFopFekQkkXihi5u/6OCvVKyz1W+idaz"',
+            '      crossorigin="anonymous"',
+            "    ></script>",
+            "    <link",
+            '      rel="stylesheet"',
+            '      href="https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;700&family=Playfair+Display:wght@700&display=swap"',
+            "    />",
+            "    <style>${styles}</style>",
+            "  </head>",
+            '  <body hx-headers=\'{"Accept":"text/html"}\'>',
+            '    <div class="container">${content}</div>',
+            "  </body>",
+            "</html>`;",
+            "}",
+            "",
+            "// ---------------------------------------------------------------------------",
+            "// Styles",
+            "// ---------------------------------------------------------------------------",
+            "",
+            "const styles = `",
+            "  :root {",
+            "    --bg: #0f1117;",
+            "    --surface: #181a24;",
+            "    --border: #262936;",
+            "    --text: #e4e5ea;",
+            "    --muted: #6b6e80;",
+            "    --accent: #6c63ff;",
+            "    --accent-hover: #5a51e6;",
+            "    --danger: #ef4444;",
+            "    --radius: 12px;",
+            '    --font: "DM Sans", "Segoe UI", system-ui, -apple-system, sans-serif;',
+            "  }",
+            "",
+            "  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }",
+            "",
+            "  body {",
+            "    font-family: var(--font);",
+            "    background: var(--bg);",
+            "    color: var(--text);",
+            "    min-height: 100vh;",
+            "  }",
+            "",
+            "  ::selection { background: var(--accent); color: white; }",
+            "",
+            "  .container { max-width: 520px; margin: 0 auto; padding: 60px 20px 40px; }",
+            "",
+            "  h1 {",
+            "    font-family: 'Playfair Display', serif;",
+            "    font-size: 38px;",
+            "    font-weight: 700;",
+            "    letter-spacing: -0.02em;",
+            "    background: linear-gradient(135deg, #6c63ff, #b794f4);",
+            "    -webkit-background-clip: text;",
+            "    -webkit-text-fill-color: transparent;",
+            "    text-align: center;",
+            "    margin-bottom: 6px;",
+            "  }",
+            "",
+            "  .subtitle { text-align: center; color: var(--muted); font-size: 14px; margin-bottom: 36px; }",
+            "",
+            "  .input-row { display: flex; gap: 8px; margin-bottom: 20px; }",
+            "",
+            "  .input-row input {",
+            "    flex: 1;",
+            "    padding: 12px 16px;",
+            "    font-size: 15px;",
+            "    font-family: var(--font);",
+            "    background: var(--surface);",
+            "    border: 1px solid var(--border);",
+            "    border-radius: var(--radius);",
+            "    color: var(--text);",
+            "    outline: none;",
+            "    transition: border-color 0.15s;",
+            "  }",
+            "  .input-row input:focus { border-color: var(--accent); }",
+            "  .input-row input::placeholder { color: var(--muted); }",
+            "",
+            "  .add-btn {",
+            "    padding: 12px 20px;",
+            "    font-size: 15px;",
+            "    font-family: var(--font);",
+            "    font-weight: 600;",
+            "    background: var(--accent);",
+            "    color: white;",
+            "    border: none;",
+            "    border-radius: var(--radius);",
+            "    cursor: pointer;",
+            "    transition: background 0.15s;",
+            "  }",
+            "  .add-btn:hover { background: var(--accent-hover); }",
+            "",
+            "  .filters {",
+            "    display: flex;",
+            "    gap: 4px;",
+            "    margin-bottom: 12px;",
+            "    background: var(--surface);",
+            "    border-radius: 8px;",
+            "    padding: 4px;",
+            "  }",
+            "",
+            "  .filter-btn {",
+            "    flex: 1;",
+            "    padding: 8px 0;",
+            "    font-size: 13px;",
+            "    font-family: var(--font);",
+            "    font-weight: 500;",
+            "    text-transform: capitalize;",
+            "    border: none;",
+            "    border-radius: 6px;",
+            "    cursor: pointer;",
+            "    background: transparent;",
+            "    color: var(--muted);",
+            "    transition: all 0.15s;",
+            "  }",
+            "  .filter-btn.active { background: var(--accent); color: white; }",
+            "",
+            "  #todo-list {",
+            "    list-style: none;",
+            "    border: 1px solid var(--border);",
+            "    border-radius: var(--radius);",
+            "    overflow: hidden;",
+            "    margin-bottom: 16px;",
+            "    min-height: 56px;",
+            "  }",
+            "",
+            "  .empty-msg {",
+            "    padding: 32px;",
+            "    text-align: center;",
+            "    color: var(--muted);",
+            "    font-size: 14px;",
+            "  }",
+            "",
+            "  .todo-item {",
+            "    display: flex;",
+            "    align-items: center;",
+            "    gap: 12px;",
+            "    padding: 14px 16px;",
+            "    border-bottom: 1px solid var(--border);",
+            "    background: var(--surface);",
+            "    transition: background 0.15s;",
+            "  }",
+            "  .todo-item:last-child { border-bottom: none; }",
+            "",
+            "  .check {",
+            "    width: 22px; height: 22px;",
+            "    border-radius: 6px;",
+            "    border: 2px solid var(--muted);",
+            "    background: transparent;",
+            "    cursor: pointer;",
+            "    display: flex;",
+            "    align-items: center;",
+            "    justify-content: center;",
+            "    flex-shrink: 0;",
+            "    transition: all 0.15s;",
+            "    padding: 0;",
+            "  }",
+            "  .check.checked { border-color: var(--accent); background: var(--accent); }",
+            "",
+            "  .title {",
+            "    flex: 1;",
+            "    font-size: 15px;",
+            "    color: var(--text);",
+            "    cursor: text;",
+            "    user-select: none;",
+            "    transition: color 0.15s;",
+            "  }",
+            "  .title.completed { color: var(--muted); text-decoration: line-through; }",
+            "",
+            "  .edit-input {",
+            "    flex: 1;",
+            "    font-family: var(--font);",
+            "    font-size: 15px;",
+            "    padding: 4px 8px;",
+            "    border: 1px solid var(--accent);",
+            "    border-radius: 6px;",
+            "    outline: none;",
+            "    background: var(--bg);",
+            "    color: var(--text);",
+            "  }",
+            "",
+            "  .delete-btn {",
+            "    background: none;",
+            "    border: none;",
+            "    cursor: pointer;",
+            "    color: var(--muted);",
+            "    font-size: 18px;",
+            "    line-height: 1;",
+            "    padding: 2px 4px;",
+            "    border-radius: 4px;",
+            "    transition: color 0.15s;",
+            "  }",
+            "  .delete-btn:hover { color: var(--danger); }",
+            "",
+            "  .footer {",
+            "    display: none;",
+            "    justify-content: space-between;",
+            "    align-items: center;",
+            "    font-size: 13px;",
+            "    color: var(--muted);",
+            "  }",
+            "  .footer.visible { display: flex; }",
+            "",
+            "  .clear-btn {",
+            "    background: none;",
+            "    border: none;",
+            "    color: var(--muted);",
+            "    font-size: 13px;",
+            "    font-family: var(--font);",
+            "    cursor: pointer;",
+            "    text-decoration: underline;",
+            "    text-underline-offset: 3px;",
+            "    transition: color 0.15s;",
+            "  }",
+            "  .clear-btn:hover { color: var(--danger); }",
+            "",
+            "  .htmx-request #todo-list { opacity: 0.6; transition: opacity 0.2s; }",
+            "`;",
+            "",
+            "// ---------------------------------------------------------------------------",
+            "// Routing",
+            "// ---------------------------------------------------------------------------",
+            "",
+            "function listResponseHtml(filter) {",
+            "  let list = allTodos();",
+            '  if (filter === "active") list = list.filter((t) => !t.completed);',
+            '  if (filter === "completed") list = list.filter((t) => t.completed);',
+            "",
+            "  return `${TodoList(list)}",
+            '    <div id="footer" hx-swap-oob="outerHTML:#footer">',
+            "      ${FooterHtml()}",
+            "    </div>`;",
+            "}",
+            "",
+            "function fullPage() {",
+            "  const list = allTodos();",
+            "  return Layout(`",
+            "    <h1>Todos</h1>",
+            '    <p class="subtitle">Double-click a todo to edit it</p>',
+            "",
+            "    <form",
+            '      class="input-row"',
+            '      hx-post="/todos"',
+            '      hx-target="#todo-list"',
+            '      hx-swap="innerHTML"',
+            '      hx-on--after-request="if(event.detail.successful) this.reset()"',
+            "    >",
+            "      <input",
+            '        type="text"',
+            '        name="title"',
+            '        placeholder="What needs to be done?"',
+            "        required",
+            '        minlength="1"',
+            '        maxlength="255"',
+            '        autocomplete="off"',
+            "      />",
+            '      <button type="submit" class="add-btn">Add</button>',
+            "    </form>",
+            "",
+            '    <div class="filters" id="filters">',
+            '      <button class="filter-btn active" hx-get="/todos/list?filter=all" hx-target="#todo-list" hx-swap="innerHTML" onclick="setFilter(this)">all</button>',
+            '      <button class="filter-btn" hx-get="/todos/list?filter=active" hx-target="#todo-list" hx-swap="innerHTML" onclick="setFilter(this)">active</button>',
+            '      <button class="filter-btn" hx-get="/todos/list?filter=completed" hx-target="#todo-list" hx-swap="innerHTML" onclick="setFilter(this)">completed</button>',
+            "    </div>",
+            "",
+            '    <ul id="todo-list">',
+            "      ${TodoList(list)}",
+            "    </ul>",
+            "",
+            "    ${FooterHtml()}",
+            "",
+            "    <script>",
+            "      function setFilter(btn) {",
+            "        document.querySelectorAll('.filter-btn').forEach(b => b.classList.remove('active'));",
+            "        btn.classList.add('active');",
+            "      }",
+            "    </script>",
+            "  `);",
+            "}",
+            "",
+            "function handleRequest(request, chatRoom) {",
+            "  const url = new URL(request.url);",
+            "  const path = url.pathname;",
+            "  const method = request.method;",
+            "",
+            "  // GET / — full page",
+            '  if (method === "GET" && path === "/") {',
+            "    return htmlResponse(fullPage());",
+            "  }",
+            "",
+            "  // GET /todos/list — filtered list partial",
+            '  if (method === "GET" && path === "/todos/list") {',
+            '    const filter = url.searchParams.get("filter") ?? "all";',
+            "    return htmlResponse(listResponseHtml(filter));",
+            "  }",
+            "",
+            "  // GET /todos/:id/edit — inline edit form",
+            "  const editMatch = path.match(/^\\/todos\\/([^/]+)\\/edit$/);",
+            '  if (method === "GET" && editMatch) {',
+            "    const todo = store.todos.find((t) => t.id === editMatch[1]);",
+            '    if (!todo) return textResponse("Not found", 404);',
+            "    return htmlResponse(TodoEditItem(todo));",
+            "  }",
+            "",
+            "  // POST /todos — create",
+            '  if (method === "POST" && path === "/todos") {',
+            "    return request.text().then(async (text) => {",
+            "      const params = new URLSearchParams(text);",
+            '      const title = await chatRoom.post(params.get("title")?.trim());',
+            '      if (!title) return textResponse("Title required", 400);',
+            "",
+            "      store.idCounter++;",
+            "      store.todos.push({",
+            "        id: store.idCounter.toString(),",
+            "        title,",
+            "        completed: false,",
+            "        createdAt: new Date().toISOString(),",
+            "      });",
+            '      return htmlResponse(listResponseHtml("all"));',
+            "    });",
+            "  }",
+            "",
+            "  // PATCH /todos/:id/toggle — toggle completed",
+            "  const toggleMatch = path.match(/^\\/todos\\/([^/]+)\\/toggle$/);",
+            '  if (method === "PATCH" && toggleMatch) {',
+            "    const todo = store.todos.find((t) => t.id === toggleMatch[1]);",
+            '    if (!todo) return textResponse("Not found", 404);',
+            "    todo.completed = !todo.completed;",
+            '    return htmlResponse(listResponseHtml("all"));',
+            "  }",
+            "",
+            "  // PATCH /todos/:id — update title",
+            "  const updateMatch = path.match(/^\\/todos\\/([^/]+)$/);",
+            '  if (method === "PATCH" && updateMatch) {',
+            "    const todo = store.todos.find((t) => t.id === updateMatch[1]);",
+            '    if (!todo) return textResponse("Not found", 404);',
+            "",
+            "    return request.text().then((text) => {",
+            "      const params = new URLSearchParams(text);",
+            '      const title = params.get("title")?.trim();',
+            "      if (title) todo.title = title;",
+            '      return htmlResponse(listResponseHtml("all"));',
+            "    });",
+            "  }",
+            "",
+            "  // DELETE /todos/:id — delete one",
+            "  const deleteMatch = path.match(/^\\/todos\\/([^/]+)$/);",
+            '  if (method === "DELETE" && deleteMatch) {',
+            "    const idx = store.todos.findIndex((t) => t.id === deleteMatch[1]);",
+            '    if (idx === -1) return textResponse("Not found", 404);',
+            "    store.todos.splice(idx, 1);",
+            '    return htmlResponse(listResponseHtml("all"));',
+            "  }",
+            "",
+            "  // DELETE /todos — clear completed",
+            '  if (method === "DELETE" && path === "/todos") {',
+            "    store.todos = store.todos.filter((t) => !t.completed);",
+            '    return htmlResponse(listResponseHtml("all"));',
+            "  }",
+            "",
+            '  return textResponse("Not found", 404);',
+            "}",
+            "",
+            "// ---------------------------------------------------------------------------",
+            "// Entrypoint",
+            "// ---------------------------------------------------------------------------",
+            "export class Agent extends WorkerEntrypoint {",
+            "  async fetch(request) {",
+            "    return handleRequest(request, this.env.CHAT_ROOM);",
+            "  }",
+            "}",
+            "",
+            "export default {",
+            "  async fetch(request) {",
+            "    return handleRequest(request, this.env.CHAT_ROOM);",
+            "  },",
+            "};",
+            "",
+          ].join("\n"),
+        },
+        mainModule: "src/index.js",
+        compatibilityDate: "2026-03-25",
+        env: {
+          CHAT_ROOM: chatRoom,
+        },
+        tails: [
+          contextExports.DynamicWorkerTail({
+            props: { workerId: "my-worker-7290" },
+          }),
+        ],
+      };
+    });
 
-        if (!files || Object.keys(files).length === 0) {
-          return Response.json(
-            { error: "At least one source file is required." },
-            { status: 400 }
-          );
-        }
-
-        const normalizedFiles = normalizeFiles(files);
-        const workerId = await createWorkerId(normalizedFiles, options);
-        const state: WorkerState = {
-          bundleInfo: null,
-          buildTime: 0
-        };
-        const contextExports = (ctx as unknown as { exports: LoaderExports })
-          .exports;
-
-        const worker = env.LOADER.get(workerId, async () => {
-          const buildStart = Date.now();
-          const { mainModule, modules, wranglerConfig, warnings } =
-            await createWorker({
-              files: normalizedFiles,
-              bundle: options?.bundle ?? true,
-              minify: options?.minify ?? false
-            });
-
-          state.buildTime = Date.now() - buildStart;
-          state.bundleInfo = {
-            mainModule,
-            modules: Object.keys(modules),
-            warnings: warnings ?? []
-          };
-
-          return {
-            mainModule,
-            modules: modules as Record<string, string>,
-            compatibilityDate:
-              wranglerConfig?.compatibilityDate ?? "2026-01-01",
-            compatibilityFlags: wranglerConfig?.compatibilityFlags ?? [],
-            env: {
-              API_KEY: "sk-example-key-12345",
-              DEBUG: "true",
-              WORKER_ID: workerId
-            },
-            globalOutbound: null,
-            tails: [
-              contextExports.DynamicWorkerTail({
-                props: { workerId }
-              })
-            ]
-          };
-        });
-
-        return executeWorker(worker, state, workerId, pathname ?? "/");
-      } catch (error) {
-        return buildErrorResponse(error);
-      }
-    }
-
-    return new Response("Not found", { status: 404 });
-  }
+    return worker.getEntrypoint("Agent").fetch(request);
+  },
 } satisfies ExportedHandler<Env>;
